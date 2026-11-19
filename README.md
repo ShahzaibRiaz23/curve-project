@@ -78,6 +78,18 @@ The admin panel includes a settings management system that allows you to configu
 3. Use **Admin** to create or update admins.
 4. Use **Role Management** to assign or update roles and permissions.
 
+## Curve patient and appointment sync
+
+The Laravel scheduler runs `curve:sync patients-appointments` every 15 minutes. It syncs patients first, then appointments, avoids overlapping runs, and appends command output to `storage/logs/curve-sync.log`. Set `CURVE_APPOINTMENT_START_DATE` to the earliest appointment date you want to import; it defaults to `2000-01-01 00:00:00`.
+
+Laravel's scheduler needs an operating-system task to invoke it every minute. On Linux, add this cron entry:
+
+```cron
+* * * * * cd /path/to/curve-project && php artisan schedule:run >> /dev/null 2>&1
+```
+
+On Windows, create a Task Scheduler task that runs every minute and executes `php artisan schedule:run` with the project directory as its working directory. Confirm the Laravel event is registered with `php artisan schedule:list`.
+
 ## License
 
 This project is open-source and available under the [MIT License](LICENSE).
