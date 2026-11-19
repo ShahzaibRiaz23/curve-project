@@ -55,6 +55,7 @@ return [
         'api_base'      => env('CURVE_API_BASE', 'https://api.curvehero.com/v1'),
         'scope'         => env('CURVE_SCOPE'),
         'sync_key'      => env('CURVE_SYNC_KEY'),
+        'appointment_start_date' => env('CURVE_APPOINTMENT_START_DATE', '2000-01-01 00:00:00'),
     ],
 
 ];

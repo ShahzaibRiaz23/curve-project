@@ -14,7 +14,7 @@ class CurveSyncCommand extends Command
      *
      * @var string
      */
-    protected $signature = 'curve:sync {entity=all : The entity to sync (all, clinics, operatories, providers, tags)}';
+    protected $signature = 'curve:sync {entity=all : The entity to sync (all, clinics, operatories, providers, tags, patients, appointments)}';
 
     /**
      * The console command description.
@@ -38,10 +38,12 @@ class CurveSyncCommand extends Command
             'tags',
             'appointment-tags',
             'appointment_tags',
+            'patients',
+            'appointments',
         ];
 
         if (! in_array($entity, $validEntities, true)) {
-            $this->error("Invalid entity [{$entity}]. Valid options are: all, clinics, operatories, providers, tags.");
+            $this->error("Invalid entity [{$entity}]. Valid options are: all, clinics, operatories, providers, tags, patients, appointments.");
 
             return self::FAILURE;
         }
@@ -53,6 +55,8 @@ class CurveSyncCommand extends Command
             'operatories' => [$service->syncOperatories()],
             'providers' => [$service->syncProviders()],
             'tags', 'appointment-tags', 'appointment_tags' => [$service->syncAppointmentTags()],
+            'patients' => [$service->syncPatients()],
+            'appointments' => [$service->syncAppointments()],
         };
 
         $hasErrors = false;

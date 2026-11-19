@@ -11,6 +11,8 @@ use Illuminate\Support\Arr;
 use App\Models\CurveProvider;
 use App\Models\CurveOperatory;
 use App\Models\CurveAppointmentTag;
+use App\Models\CurvePatient;
+use App\Models\CurveAppointment;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Database\Eloquent\Model;
 
@@ -310,38 +312,91 @@ class CurveSyncService
         ];
     }
 
-    /**
-     * Sync patients (Handled on-demand via PatientService / GHL webhooks).
-     */
+    /** Sync patients from Curve Dental. */
     public function syncPatients(): array
     {
-        return [
-            'entity' => 'patients',
-            'fetched' => 0,
-            'created' => 0,
-            'updated' => 0,
-            'skipped' => 0,
-            'errors' => [],
-        ];
+        return $this->syncRecords('patients', '/patient', function (array $record): void {
+            if (! isset($record['id'])) {
+                throw new RuntimeException('Patient record missing id.');
+            }
+
+            app(PatientService::class)->savePatientToDatabase($record);
+        });
     }
 
-    /**
-     * Sync appointments (Handled on-demand via AppointmentService / webhooks).
-     */
+    /** Sync appointments from Curve Dental. */
     public function syncAppointments(): array
     {
-        return [
-            'entity' => 'appointments',
-            'fetched' => 0,
-            'created' => 0,
-            'updated' => 0,
-            'skipped' => 0,
-            'errors' => [],
-        ];
+        $startDate = (string) config('services.curve.appointment_start_date', '2000-01-01 00:00:00');
+
+        return $this->syncRecords('appointments', '/appointment', function (array $record): void {
+            if (! isset($record['id'])) {
+                throw new RuntimeException('Appointment record missing id.');
+            }
+            if (empty($record['startTime'])) {
+                throw new RuntimeException('Appointment record missing startTime.');
+            }
+
+            app(AppointmentService::class)->saveAppointmentToDatabase($record);
+        }, ['startDate' => $startDate]);
+    }
+
+    /** Fetch and persist records while keeping one failure from stopping the batch. */
+    protected function syncRecords(string $entity, string $path, callable $save, array $query = []): array
+    {
+        try {
+            $records = $this->fetchAll($path, $query);
+        } catch (\Throwable $e) {
+            return ['entity' => $entity, 'fetched' => 0, 'created' => 0, 'updated' => 0, 'skipped' => 0,
+                'errors' => [['id' => null, 'message' => $e->getMessage()]]];
+        }
+
+        $created = $updated = $skipped = 0;
+        $errors = [];
+        foreach ($records as $record) {
+            if ($entity === 'appointments' && empty($record['patientId'])) {
+                // The appointment endpoint also returns non-patient schedule entries.
+                $skipped++;
+                continue;
+            }
+
+            try {
+                $id = (string) ($record['id'] ?? '');
+                $startTime = $entity === 'appointments' && ! empty($record['startTime'])
+                    ? Carbon::parse($record['startTime'])->format('Y-m-d H:i:s')
+                    : null;
+                $existing = $entity === 'patients'
+                    ? CurvePatient::where('curve_id', $id)->first()
+                    : CurveAppointment::where('curve_id', $id)->where('start_time', $startTime)->first();
+                $incomingUpdatedAt = $entity === 'appointments' ? $this->parseDate($record['updatedAt'] ?? null) : null;
+                if ($existing && $incomingUpdatedAt && $existing->curve_updated_at?->equalTo($incomingUpdatedAt)) {
+                    $skipped++;
+                    continue;
+                }
+
+                $before = $existing?->getAttributes();
+                $save($record);
+                $saved = $entity === 'patients'
+                    ? CurvePatient::where('curve_id', $id)->first()
+                    : CurveAppointment::where('curve_id', $id)->where('start_time', $startTime)->first();
+                if (! $existing) {
+                    $created++;
+                } elseif ($before === $saved?->getAttributes()) {
+                    $skipped++;
+                } else {
+                    $updated++;
+                }
+            } catch (\Throwable $e) {
+                $errors[] = ['id' => $record['id'] ?? null, 'message' => $e->getMessage()];
+            }
+        }
+
+        return ['entity' => $entity, 'fetched' => count($records), 'created' => $created, 'updated' => $updated,
+            'skipped' => $skipped, 'errors' => $errors];
     }
 
     /**
-     * Run all syncs in order: clinics, operatories, providers, tags.
+     * Run all syncs in dependency order, including patients before appointments.
      */
     public function syncAll(): array
     {
@@ -358,20 +413,15 @@ class CurveSyncService
     /**
      * Fetch all records across paginated endpoints.
      */
-    protected function fetchAll(string $path): array
+    protected function fetchAll(string $path, array $query = []): array
     {
         $records = [];
         $currentUrl = $path;
         $pages = 0;
 
-        $apiBase = config('services.curve.api_base', 'https://api.curvehero.com/v1');
-        $parsedScheme = parse_url($apiBase, PHP_URL_SCHEME) ?: 'https';
-        $parsedHost = parse_url($apiBase, PHP_URL_HOST) ?: 'api.curvehero.com';
-        $baseHostUrl = "{$parsedScheme}://{$parsedHost}";
-
         while ($currentUrl && $pages < 200) {
             $pages++;
-            $response = CurveAuth::get($currentUrl);
+            $response = CurveAuth::get($currentUrl, $query);
 
             if ($response->failed()) {
                 $status = $response->status();
@@ -410,12 +460,13 @@ class CurveSyncService
                     static::$loggedFirstMetaNext = true;
                 }
 
-                if (str_starts_with($next, '/')) {
-                    $currentUrl = $baseHostUrl.$next;
-                } elseif (str_starts_with($next, 'http')) {
-                    $currentUrl = $next;
+                $nextQuery = parse_url($next, PHP_URL_QUERY);
+                if (is_string($nextQuery)) {
+                    parse_str($nextQuery, $nextParameters);
+                    $query = array_merge($query, $nextParameters);
+                    $currentUrl = $path;
                 } else {
-                    $currentUrl = $baseHostUrl.'/'.$next;
+                    $currentUrl = $next;
                 }
             } else {
                 break;
@@ -443,11 +494,20 @@ class CurveSyncService
             if (! empty($data['errors'])) {
                 if (is_array($data['errors'])) {
                     $messages = [];
-                    foreach ($data['errors'] as $err) {
-                        if (is_array($err)) {
-                            $messages[] = (string) ($err['error'] ?? $err['message'] ?? json_encode($err));
-                        } elseif (is_string($err)) {
-                            $messages[] = $err;
+                    foreach ($data['errors'] as $key => $err) {
+                        $prefix = is_string($key) ? "{$key}: " : '';
+                        if (is_string($err)) {
+                            $messages[] = $prefix.$err;
+                        } elseif (is_array($err)) {
+                            $inner = $err['error'] ?? $err;
+                            if (is_array($inner)) {
+                                $message = $inner['message'] ?? $inner['error'] ?? null;
+                                $messages[] = $prefix.(is_string($message) ? $message : (json_encode($inner) ?: 'Unknown API error'));
+                            } elseif (is_string($inner)) {
+                                $messages[] = $prefix.$inner;
+                            } else {
+                                $messages[] = $prefix.(json_encode($err) ?: 'Unknown API error');
+                            }
                         }
                     }
                     if (! empty($messages)) {
