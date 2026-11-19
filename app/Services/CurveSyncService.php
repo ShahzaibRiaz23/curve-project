@@ -311,6 +311,36 @@ class CurveSyncService
     }
 
     /**
+     * Sync patients (Handled on-demand via PatientService / GHL webhooks).
+     */
+    public function syncPatients(): array
+    {
+        return [
+            'entity' => 'patients',
+            'fetched' => 0,
+            'created' => 0,
+            'updated' => 0,
+            'skipped' => 0,
+            'errors' => [],
+        ];
+    }
+
+    /**
+     * Sync appointments (Handled on-demand via AppointmentService / webhooks).
+     */
+    public function syncAppointments(): array
+    {
+        return [
+            'entity' => 'appointments',
+            'fetched' => 0,
+            'created' => 0,
+            'updated' => 0,
+            'skipped' => 0,
+            'errors' => [],
+        ];
+    }
+
+    /**
      * Run all syncs in order: clinics, operatories, providers, tags.
      */
     public function syncAll(): array
@@ -320,6 +350,8 @@ class CurveSyncService
             'operatories' => $this->syncOperatories(),
             'providers' => $this->syncProviders(),
             'appointment_tags' => $this->syncAppointmentTags(),
+            'patients' => $this->syncPatients(),
+            'appointments' => $this->syncAppointments(),
         ];
     }
 
